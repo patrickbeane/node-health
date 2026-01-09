@@ -1,0 +1,19 @@
+[Unit]
+Description=Run Node Health Check each minute
+Documentation=https://github.com/patrickbeane/node-health
+
+[Timer]
+# Run 5 minutes after boot
+OnBootSec=5min
+
+# Run each minute thereafter
+OnUnitActiveSec=1min
+
+# Spread load randomly across 20 seconds
+RandomizedDelaySec=20
+
+# If system was off, run on next boot
+Persistent=true
+
+[Install]
+WantedBy=timers.target

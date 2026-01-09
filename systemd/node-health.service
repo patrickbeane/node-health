@@ -1,0 +1,24 @@
+[Unit]
+Description=Node Health Check and Failover
+Documentation=https://github.com/patrickbeane/node-health
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=YOUR_USERNAME
+Group=YOUR_GROUP
+WorkingDirectory=/path/to/node-health
+ExecStart=/usr/bin/python3 /path/to/node-health/health_check.py
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/YOUR_USERNAME/.local/state/node-health
+
+[Install]
+WantedBy=multi-user.target

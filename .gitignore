@@ -1,0 +1,22 @@
+# Secrets and Credentials
+.env
+*.pem
+*.key
+
+# Python Virtual Environments
+venv/
+.venv/
+env/
+
+# Logs and Runtime Data
+logs/
+*.log
+*.lock
+
+# Python Cache
+__pycache__/
+*.py[cod]
+
+# OS specific files
+.DS_Store
+Thumbs.db
