@@ -287,7 +287,7 @@ def notify(message: str, webhook_url: str):
         return
     
     try:
-        r = requests.post(webhook_url,json={"content": message}, timeout=3)
+        r = requests.post(webhook_url,json={"text": message}, timeout=3)
         if r.status_code != 204:
             log(f"Discord notification failed: HTTP {r.status_code}", "WARN")
     except Exception as e:
