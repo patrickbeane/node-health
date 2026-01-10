@@ -210,7 +210,7 @@ Mirror healthy: True
 - Verify Cloudflare API token has DNS edit permissions
 - Check zone ID is correct: `CF_ZONE_ID` in `.env`
 - Look for lock file: `~/.local/state/node-health/LOCK`
-- Check cooldown hasn't been triggered (10 min default)
+- Check cooldown hasn't been triggered (5 min default)
 
 ### Health Checks Failing
 
