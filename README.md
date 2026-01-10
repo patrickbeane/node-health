@@ -197,6 +197,13 @@ Primary healthy: False
 Mirror healthy: True
 ```
 
+**Important:** Use the `/slack` endpoint for your Discord webhook URL:
+```
+https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN/slack
+```
+
+This ensures compatibility with the `{"text": "message"}` format used by the script.
+
 ## Troubleshooting
 
 ### Script Won't Run
