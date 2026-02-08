@@ -11,6 +11,7 @@ import os
 import sys
 import argparse
 from dotenv import load_dotenv
+import time
 
 # ----------------------------
 # Config
@@ -66,39 +67,39 @@ def validate_services():
     """Validate SERVICES configuration at startup"""
     required_fields = ["dns_name", "primary", "mirror"]
     endpoint_fields = ["url", "ip", "check"]
-    
+
     for name, service in SERVICES.items():
         for field in required_fields:
             if field not in service:
                 log(f"Service '{name}' missing required field: {field}", "ERROR")
                 return False
-        
+
         for role in ["primary", "mirror"]:
             for field in endpoint_fields:
                 if field not in service[role]:
                     log(f"Service '{name}' {role} missing field: {field}", "ERROR")
                     return False
-            
+
             check_type = service[role]["check"]
             if check_type not in ["http", "intel", "threats"]:
                 log(f"Service '{name}' {role} has invalid check type: {check_type}", "ERROR")
                 return False
-    
+
     return True
 
 def check_health(service: dict, role: str) -> bool:
     endpoint = service[role]
     check_type = endpoint["check"]
-    
+
     debug(f"Running {check_type} health check on {endpoint['url']}")
-    
+
     if check_type == "intel":
         return check_intel_health(endpoint["url"])
     elif check_type == "threats":
         return check_threats_health(endpoint["url"])
     elif check_type == "http":
         return check_http_health(endpoint["url"])
-    
+
     return False
 
 def check_http_health(url: str) -> bool:
@@ -113,59 +114,81 @@ def check_http_health(url: str) -> bool:
         return False
 
 def check_intel_health(url: str) -> bool:
-    try:
-        r = requests.get(url, timeout=HTTP_TIMEOUT)
-        if r.status_code != 200:
-            return False
+    for attempt in range(3):
+        try:
+            r = requests.get(url, timeout=HTTP_TIMEOUT)
 
-        data = r.json()
-        total_bans = data.get("total_bans")
-        top_countries = data.get("top_countries")
+            if r.status_code != 200:
+                debug(f"Intel check attempt {attempt+1} failed: HTTP {r.status_code}")
+                time.sleep(2)
+                continue
 
-        if not isinstance(total_bans, int) or total_bans <= 0:
-            debug(f"Intel check failed: invalid total_bans")
-            return False
+            data = r.json()
 
-        if not isinstance(top_countries, list) or len(top_countries) == 0:
-            debug(f"Intel check failed: invalid top_countries")
-            return False
+            total_bans = data.get("total_bans")
+            top_countries = data.get("top_countries")
 
-        return True
-    except Exception as e:
-        debug(f"Intel health check failed: {url} - {e}")
-        return False
+            if not isinstance(total_bans, int) or total_bans < 0:
+                debug(f"Intel check attempt {attempt+1}: invalid total_bans={total_bans}")
+                time.sleep(2)
+                continue
+
+            if not isinstance(top_countries, list):
+                debug(f"Intel check attempt {attempt+1}: invalid top_countries type")
+                time.sleep(2)
+                continue
+
+            if len(top_countries) == 0:
+                debug("Intel API reachable but returned empty data (degraded)")
+
+            return True
+
+        except Exception as e:
+            debug(f"Intel health check attempt {attempt+1} error: {e}")
+            time.sleep(2)
+
+    debug("Intel health check failed after 3 attempts")
+    return False
 
 def check_threats_health(url: str) -> bool:
     try:
         r = requests.get(url, timeout=HTTP_TIMEOUT)
         if r.status_code != 200:
+            debug(f"Threats check failed: HTTP {r.status_code}")
             return False
 
         data = r.json()
 
         if "generated_at" not in data or "threats" not in data:
-            debug(f"Threats check failed: missing required fields")
-            return False
-
-        generated_at = parse_iso_z(data["generated_at"])
-        age = datetime.now(UTC) - generated_at
-        if age > STALE_THRESHOLD:
-            debug(f"Threats check failed: data is stale ({age})")
+            debug("Threats check failed: missing required top-level fields")
             return False
 
         if not isinstance(data["threats"], list):
-            debug(f"Threats check failed: threats is not a list")
+            debug("Threats check failed: threats is not a list")
             return False
 
-        for t in data["threats"]:
-            if "ip" not in t or "confidence" not in t:
-                debug(f"Threats check failed: threat missing required fields")
-                return False
+        try:
+            generated_at = parse_iso_z(data["generated_at"])
+            age = datetime.now(UTC) - generated_at
+            if age > STALE_THRESHOLD:
+                debug(f"Threats API reachable but data is stale ({age})")
+        except Exception as e:
+            debug(f"Threats check warning: invalid generated_at ({e})")
+
+        malformed = 0
+        for t in data["threats"][:10]:
+            if not isinstance(t, dict) or "ip" not in t:
+                malformed += 1
+
+        if malformed:
+            debug(f"Threats check warning: {malformed} malformed threat entries")
 
         return True
+
     except Exception as e:
         debug(f"Threats health check failed: {url} - {e}")
         return False
+
 
 # ----------------------------
 # Env / Setup
@@ -205,19 +228,32 @@ def get_cf_headers(api_token: str):
         "Content-Type": "application/json"
     }
 
+def cf_api_request(method: str, url: str, headers: dict, *, params: dict | None = None,
+                   json: dict | None = None, timeout: int = CF_TIMEOUT):
+    r = requests.request(method, url, headers=headers, params=params, json=json, timeout=timeout)
+    r.raise_for_status()
+    try:
+        data = r.json()
+    except Exception as e:
+        raise RuntimeError(f"Cloudflare API returned non-JSON response: {e}") from e
+
+    if not data.get("success", False):
+        errors = data.get("errors") or data.get("messages") or "unknown error"
+        raise RuntimeError(f"Cloudflare API error: {errors}")
+
+    return data
+
 def get_dns_record(dns_name: str, zone_id: str, headers: dict):
     url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
-    params = {"type": "A", "name": dns_name}
-    r = requests.get(url, headers=headers, params=params, timeout=CF_TIMEOUT)
-    r.raise_for_status()
-    records = r.json()["result"]
+    data = cf_api_request("GET", url, headers, params={"type": "A", "name": dns_name})
+    records = data["result"]
     return records[0] if records else None
 
 def update_dns_record(record_id: str, dns_name: str, ip: str, record_type: str, zone_id: str, headers: dict):
     if DRY_RUN:
         log(f"[DRY-RUN] Would update {record_type} record {dns_name} to {ip}", "INFO")
         return
-    
+
     url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}"
     payload = {
         "type": record_type,
@@ -226,11 +262,10 @@ def update_dns_record(record_id: str, dns_name: str, ip: str, record_type: str, 
         "ttl": DNS_TTL,
         "proxied": False
     }
-    
+
     for attempt in range(2):
         try:
-            r = requests.put(url, headers=headers, json=payload, timeout=CF_TIMEOUT)
-            r.raise_for_status()
+            cf_api_request("PUT", url, headers, json=payload)
             return
         except requests.exceptions.RequestException as e:
             if attempt == 1:
@@ -239,40 +274,37 @@ def update_dns_record(record_id: str, dns_name: str, ip: str, record_type: str, 
             debug(f"DNS update attempt {attempt + 1} failed, retrying...")
 
 def get_aaaa_record(dns_name: str, zone_id: str, headers: dict):
-    r = requests.get(
+    data = cf_api_request(
+        "GET",
         f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
-        headers=headers,
-        params={"type": "AAAA", "name": dns_name},
-        timeout=CF_TIMEOUT
+        headers,
+        params={"type": "AAAA", "name": dns_name}
     )
-    r.raise_for_status()
-    records = r.json()["result"]
+    records = data["result"]
     return records[0] if records else None
 
 def create_aaaa_record(dns_name: str, ipv6: str, zone_id: str, headers: dict):
     if DRY_RUN:
         log(f"[DRY-RUN] Would create AAAA record {dns_name} to {ipv6}", "INFO")
         return
-    
-    r = requests.post(
+
+    cf_api_request(
+        "POST",
         f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
         headers=headers,
-        json={"type": "AAAA", "name": dns_name, "content": ipv6, "ttl": DNS_TTL, "proxied": False},
-        timeout=CF_TIMEOUT
+        json={"type": "AAAA", "name": dns_name, "content": ipv6, "ttl": DNS_TTL, "proxied": False}
     )
-    r.raise_for_status()
 
 def delete_dns_record(record_id: str, zone_id: str, headers: dict):
     if DRY_RUN:
         log(f"[DRY-RUN] Would delete DNS record {record_id}", "INFO")
         return
-    
-    r = requests.delete(
+
+    cf_api_request(
+        "DELETE",
         f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}",
-        headers=headers,
-        timeout=CF_TIMEOUT
+        headers=headers
     )
-    r.raise_for_status()
 
 # ----------------------------
 # Discord Notify
@@ -281,14 +313,14 @@ def delete_dns_record(record_id: str, zone_id: str, headers: dict):
 def notify(message: str, webhook_url: str):
     if not webhook_url:
         return
-    
+
     if DRY_RUN:
         log(f"[DRY-RUN] Would send Discord notification: {message}", "INFO")
         return
-    
+
     try:
         r = requests.post(webhook_url,json={"text": message}, timeout=3)
-        if r.status_code != 204:
+        if r.status_code not in [200, 204]:
             log(f"Discord notification failed: HTTP {r.status_code}", "WARN")
     except Exception as e:
         log(f"Discord notification failed: {e}", "WARN")
@@ -315,7 +347,7 @@ def last_switch_time(service: str):
 def record_switch(service: str):
     if DRY_RUN:
         return
-    
+
     path = os.path.join(STATE_DIR, f"{service}.last_switch")
     try:
         with open(path, "w") as f:
@@ -329,28 +361,28 @@ def record_switch(service: str):
 
 def main():
     global DRY_RUN, VERBOSE
-    
+
     parser = argparse.ArgumentParser(description="Service health check and DNS failover")
     parser.add_argument("--dry-run", action="store_true", help="Allow a run to show what would be done without making changes")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
-    
+
     DRY_RUN = args.dry_run
     VERBOSE = args.verbose
-    
+
     if DRY_RUN:
         log("Running in DRY-RUN mode - no changes will be made", "INFO")
-    
+
     if not validate_services():
         log("Service configuration validation failed", "ERROR")
         sys.exit(1)
-    
+
     config = load_config()
     if not config:
         sys.exit(1)
 
     cf_headers = get_cf_headers(config["CF_API_TOKEN"])
-    
+
     if os.path.exists(LOCK_FILE) and not DRY_RUN:
         log("Failover locked — exiting (remove LOCK file to resume)", "WARN")
         return
