@@ -12,6 +12,7 @@ import sys
 import argparse
 from dotenv import load_dotenv
 import time
+import random
 
 # ----------------------------
 # Config
@@ -390,6 +391,8 @@ def main():
     for name, service in SERVICES.items():
         try:
             log(f"Checking service: {name}", "INFO")
+
+            time.sleep(random.uniform(5, 10))
 
             primary_ok = check_health(service, "primary")
             mirror_ok = check_health(service, "mirror")
